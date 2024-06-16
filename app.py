@@ -51,10 +51,6 @@ async def get_today_meal_menu():
                             "name": meal['name'],
                             "side": meal['side']
                         }
-
-        if not result:
-            raise Exception(f"Menu data for the given date not found. {formatted_korea_now}")
-
         return result
 
 
@@ -80,17 +76,23 @@ async def slack_lunch(request: Request):
     korea_now = utc_now.astimezone(pytz.timezone("Asia/Seoul"))
     today_str = f"{korea_now.month}월 {korea_now.day}일"
 
-    # Build response message
-    response_message = {
-        "response_type": "in_channel",
-        "text": f"오늘({today_str})의 점심 메뉴입니다:",
-        "attachments": []
-    }
+    if meal_menu:
+        # Build response message
+        response_message = {
+            "response_type": "in_channel",
+            "text": f"오늘({today_str})의 점심 메뉴입니다:",
+            "attachments": []
+        }
 
-    # Add meal information to the response
-    for corner, menu in meal_menu.items():
-        response_message["attachments"].append({
-            "text": f"{corner}: {menu['name']} - 반찬: {menu['side']}"
-        })
+        # Add meal information to the response
+        for corner, menu in meal_menu.items():
+            response_message["attachments"].append({
+                "text": f"{corner}: {menu['name']} - 반찬: {menu['side']}"
+            })
+    else:
+        response_message = {
+            "response_type": "in_channel",
+            "text": f"오늘({today_str})의 메뉴 정보가 없습니다. 아직 메뉴 정보가 업데이트 되지 않았을 수 있습니다."
+        }
 
     return JSONResponse(content=response_message)
