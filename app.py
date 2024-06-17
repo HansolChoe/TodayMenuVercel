@@ -90,9 +90,12 @@ async def slack_lunch(request: Request):
                 "text": f"{corner}: {menu['name']} - 반찬: {menu['side']}"
             })
     else:
+        text = f"오늘({today_str})의 메뉴 정보가 없습니다. 아직 메뉴 정보가 업데이트 되지 않았을 수 있습니다."
+        if korea_now.weekday() == 0:
+            text += " 월요일의 경우 메뉴 정보가 늦게 업데이트 될 수 있습니다."
         response_message = {
             "response_type": "in_channel",
-            "text": f"오늘({today_str})의 메뉴 정보가 없습니다. 아직 메뉴 정보가 업데이트 되지 않았을 수 있습니다."
+            "text": text
         }
 
     return JSONResponse(content=response_message)
