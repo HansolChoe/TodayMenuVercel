@@ -1,5 +1,7 @@
 import datetime
 import os
+import logging
+import sys
 
 import dotenv
 import httpx
@@ -7,8 +9,19 @@ import pytz
 from fastapi import FastAPI, Request, HTTPException
 from slack_sdk import WebClient
 from starlette.responses import JSONResponse, HTMLResponse
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 dotenv.load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -20,6 +33,7 @@ if not TODAY_MEAL_URL:
     raise Exception("TODAY_MEAL_URL is not set")
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
 async def get_today_meal_menu():
     async with httpx.AsyncClient() as client:
         utc_now = datetime.datetime.now(pytz.utc)
@@ -71,31 +85,37 @@ async def read_root():
 
 @app.post("/commands/lunch")
 async def slack_lunch(request: Request):
-    meal_menu = await get_today_meal_menu()
-    utc_now = datetime.datetime.now(pytz.utc)
-    korea_now = utc_now.astimezone(pytz.timezone("Asia/Seoul"))
-    today_str = f"{korea_now.month}월 {korea_now.day}일"
+    try:
+        logger.info("Recieved lunch command request")
+        meal_menu = await get_today_meal_menu()
+        logger.info(f"Retrieved meal menu: {meal_menu}")
+        utc_now = datetime.datetime.now(pytz.utc)
+        korea_now = utc_now.astimezone(pytz.timezone("Asia/Seoul"))
+        today_str = f"{korea_now.month}월 {korea_now.day}일"
 
-    if meal_menu:
-        # Build response message
-        response_message = {
-            "response_type": "in_channel",
-            "text": f"오늘({today_str})의 점심 메뉴입니다:",
-            "attachments": []
-        }
+        if meal_menu:
+            # Build response message
+            response_message = {
+                "response_type": "in_channel",
+                "text": f"오늘({today_str})의 점심 메뉴입니다:",
+                "attachments": []
+            }
 
-        # Add meal information to the response
-        for corner, menu in meal_menu.items():
-            response_message["attachments"].append({
-                "text": f"{corner}: {menu['name']} - 반찬: {menu['side']}"
-            })
-    else:
-        text = f"오늘({today_str})의 메뉴 정보가 없습니다. 아직 메뉴 정보가 업데이트 되지 않았을 수 있습니다."
-        if korea_now.weekday() == 0:
-            text += " 월요일의 경우 메뉴 정보가 늦게 업데이트 될 수 있습니다."
-        response_message = {
-            "response_type": "in_channel",
-            "text": text
-        }
+            # Add meal information to the response
+            for corner, menu in meal_menu.items():
+                response_message["attachments"].append({
+                    "text": f"{corner}: {menu['name']} - 반찬: {menu['side']}"
+                })
+        else:
+            text = f"오늘({today_str})의 메뉴 정보가 없습니다. 아직 메뉴 정보가 업데이트 되지 않았을 수 있습니다."
+            if korea_now.weekday() == 0:
+                text += " 월요일의 경우 메뉴 정보가 늦게 업데이트 될 수 있습니다."
+            response_message = {
+                "response_type": "in_channel",
+                "text": text
+            }
+    except Exception as e:
+        logger.exception(f"Error in slack_lunch: {str(e)}")
+        return JSONResponse(content={"text": f"Failed to retrieve meal data: {str(e)}"}, status_code=500)
 
     return JSONResponse(content=response_message)
