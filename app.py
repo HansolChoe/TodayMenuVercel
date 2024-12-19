@@ -4,12 +4,13 @@ import logging
 import sys
 
 import dotenv
-import httpx
 import pytz
 from fastapi import FastAPI, Request, HTTPException
 from slack_sdk import WebClient
 from starlette.responses import JSONResponse, HTMLResponse
 from tenacity import retry, stop_after_attempt, wait_fixed
+
+from utils import fetch_meal_data
 
 dotenv.load_dotenv()
 
@@ -25,47 +26,36 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-TODAY_MEAL_URL = os.getenv("TODAY_MEAL_URL")
 SLACK_TOKEN = os.getenv("SLACK_TOKEN")
 client = WebClient(token=SLACK_TOKEN)
 
-if not TODAY_MEAL_URL:
-    raise Exception("TODAY_MEAL_URL is not set")
 
+def format_error_message(error: str) -> str:
+    return f"점심 메뉴 정보를 가져오는 데 실패했습니다. 에러: {error}"
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
-async def get_today_meal_menu():
-    async with httpx.AsyncClient() as client:
+async def get_today_meal_text():
+    try:
         utc_now = datetime.datetime.now(pytz.utc)
         korea_now = utc_now.astimezone(pytz.timezone("Asia/Seoul"))
-        formatted_korea_now = korea_now.strftime("%Y%m%d")
+        formatted_korea_now = korea_now.strftime("%Y-%m-%d")
 
-        url = TODAY_MEAL_URL
-        response = await client.get(url)
+        meal_data = fetch_meal_data()
+        if not meal_data:
+            if korea_now.weekday() in [5, 6]:
+                meal_text = "오늘은 주말입니다. 점심 메뉴 정보가 없습니다."
+            elif korea_now.weekday() == 0:
+                meal_text = "점심 메뉴 정보가 아직 업데이트되지 않았습니다. 월요일의 경우 정보가 늦게 업데이트될 수 있습니다."
+            else:
+                meal_text = "오늘 판교 캠퍼스 점심 메뉴가 이작 업데이트 되지 않았습니다."
+        else:
+            formatted_meal_data = "\n".join([f"- {k}: {v}" for k, v in meal_data.items()])
+            meal_text = f"판교 캠퍼스 점심 메뉴({formatted_korea_now}) 입니다:\n" + formatted_meal_data
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to retrieve data")
-
-        data = response.json()
-        if data['status'] != 'success':
-            raise HTTPException(status_code=500, detail="Failed to retrieve data")
-
-        meal_data = data.get('data', {})
-
-        # Initialize result dictionary
-        result = {}
-
-        # Traverse the meal data to find the desired date
-        for day, meals in meal_data.items():
-            for meal in meals.get("2", []):  # Assuming mealCd "2" represents the relevant meals
-                if meal['mealDt'] == formatted_korea_now:
-                    corner = meal.get('corner')
-                    if corner:
-                        result[corner] = {
-                            "name": meal['name'],
-                            "side": meal['side']
-                        }
-        return result
+        return meal_text
+    except Exception as e:
+        logger.exception(f"Error while fetching meal data: {e}")
+        raise HTTPException(status_code=500, detail=format_error_message(str(e)))
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -86,36 +76,18 @@ async def read_root():
 @app.post("/commands/lunch")
 async def slack_lunch(request: Request):
     try:
-        logger.info("Recieved lunch command request")
-        meal_menu = await get_today_meal_menu()
-        logger.info(f"Retrieved meal menu: {meal_menu}")
-        utc_now = datetime.datetime.now(pytz.utc)
-        korea_now = utc_now.astimezone(pytz.timezone("Asia/Seoul"))
-        today_str = f"{korea_now.month}월 {korea_now.day}일"
-
-        if meal_menu:
-            # Build response message
-            response_message = {
-                "response_type": "in_channel",
-                "text": f"오늘({today_str})의 점심 메뉴입니다:",
-                "attachments": []
-            }
-
-            # Add meal information to the response
-            for corner, menu in meal_menu.items():
-                response_message["attachments"].append({
-                    "text": f"{corner}: {menu['name']} - 반찬: {menu['side']}"
-                })
-        else:
-            text = f"오늘({today_str})의 메뉴 정보가 없습니다. 아직 메뉴 정보가 업데이트 되지 않았을 수 있습니다."
-            if korea_now.weekday() == 0:
-                text += " 월요일의 경우 메뉴 정보가 늦게 업데이트 될 수 있습니다."
-            response_message = {
-                "response_type": "in_channel",
-                "text": text
-            }
+        logger.info("Received lunch command request")
+        today_meal_text = await get_today_meal_text()
+        response_message = {
+            "response_type": "in_channel",
+            "text": today_meal_text
+        }
+    except HTTPException as http_exc:
+        logger.warning(f"Known error: {http_exc.detail}")
+        return JSONResponse(content={"text": http_exc.detail}, status_code=http_exc.status_code)
     except Exception as e:
-        logger.exception(f"Error in slack_lunch: {str(e)}")
-        return JSONResponse(content={"text": f"Failed to retrieve meal data: {str(e)}"}, status_code=500)
+        logger.exception(f"Unexpected error: {e}")
+        return JSONResponse(content={"text": format_error_message("알 수 없는 오류가 발생했습니다.")}, status_code=500)
 
     return JSONResponse(content=response_message)
+
